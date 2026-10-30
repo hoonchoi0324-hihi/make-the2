@@ -1916,23 +1916,65 @@ async function initOnline(){
     await loadScript(`https://www.gstatic.com/firebasejs/${v}/firebase-app-compat.js`);
     await loadScript(`https://www.gstatic.com/firebasejs/${v}/firebase-auth-compat.js`);
     await loadScript(`https://www.gstatic.com/firebasejs/${v}/firebase-firestore-compat.js`);
-    firebase.initializeApp(FIREBASE_CONFIG);
+    if(!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
     db = firebase.firestore();
     const cred = await firebase.auth().signInAnonymously();
     myUid = cred.user.uid;
-    await claimCapital();
-    await publishNation();
-    listenOnline();
-    setOnlineStatus("",false);
-    document.getElementById("onlineBody").classList.remove("hidden");
-    onlinePublishTimer = setInterval(publishNation, 20000);
-    onlineTickTimer = setInterval(updateOnlineTicker, 1000);
-    onlineIncomeTimer = setInterval(payTileIncome, 60000);
+    await enterWorld();
   }catch(e){
     console.error(e);
     onlineStarted = false;
     setOnlineStatus("⚠️ 온라인 세계 연결 실패<br><small>"+esc(e.message||e)+"</small><br><button class='btn btn-soft' style='margin-top:8px' onclick='initOnline()'>다시 연결</button>",true);
   }
+}
+
+
+
+/* ---------- 🏷️ 나라 이름 중복 금지 ----------
+   names/{이름} 문서 = "이 이름의 주인은 누구" 장부. 먼저 차지한 사람만 그 이름을 쓸 수 있음 */
+let nameBlocked=false, worldEntered=false;
+function nameKey(n){return encodeURIComponent(String(n).normalize("NFC").toLowerCase().replace(/\s+/g,"")).slice(0,300)}
+
+async function claimName(newName, oldName){
+  const ref=db.doc("names/"+nameKey(newName));
+  const ok=await db.runTransaction(async tx=>{
+    const s=await tx.get(ref);
+    if(s.exists && s.data().owner!==myUid) return false;
+    if(!s.exists) tx.set(ref,{owner:myUid,name:newName,at:Date.now()});
+    return true;
+  });
+  if(ok) releaseOtherNames(nameKey(newName));
+  return ok;
+}
+async function releaseOtherNames(keepKey){
+  try{
+    const q=await db.collection("names").where("owner","==",myUid).get();
+    q.forEach(d=>{ if(d.id!==keepKey) d.ref.delete().catch(()=>{}); });
+  }catch(e){console.warn(e)}
+}
+async function isNameFree(name){
+  try{const s=await db.doc("names/"+nameKey(name)).get();return !s.exists||s.data().owner===myUid}catch(e){return true}
+}
+
+async function enterWorld(){
+  const ok=await claimName(state.country);
+  if(!ok){
+    nameBlocked=true;
+    setOnlineStatus(`🚫 <b>${esc(state.country)}</b>(이)라는 나라가 이미 온라인 세계에 있어요.<br>같은 이름의 나라는 만들 수 없어요. 이름을 바꿔야 들어갈 수 있어요.<br><button class='btn btn-primary' style='margin-top:10px' onclick='openProfile(true)'>✏️ 나라 이름 바꾸기</button>`,true);
+    document.getElementById("onlineBody").classList.add("hidden");
+    return;
+  }
+  nameBlocked=false;
+  if(worldEntered) return;
+  worldEntered=true;
+  await claimCapital();
+  await publishNation();
+  listenOnline();
+  setOnlineStatus("",false);
+  document.getElementById("onlineBody").classList.remove("hidden");
+  onlinePublishTimer = setInterval(publishNation, 20000);
+  onlineTickTimer = setInterval(updateOnlineTicker, 1000);
+  onlineIncomeTimer = setInterval(payTileIncome, 60000);
 }
 
 function idx(x,y){return y*WORLD_W+x}
@@ -1976,7 +2018,7 @@ function priceOf(n,tiles){
 }
 
 async function publishNation(){
-  if(!db || !myUid || !state || !state.country) return;
+  if(!db || !myUid || !state || !state.country || nameBlocked) return;
   const price = myPrice();
   try{
     await db.doc("nations/"+myUid).set({
@@ -2413,7 +2455,7 @@ function renderMyCard(){
   el.innerHTML=cardHtml({avatar:getPresidentAvatar(),flag:state.flag,flagPix:p.flagPix,country:state.country,president:state.president,motto:p.motto,color:p.color});
 }
 
-function openProfile(){
+function openProfile(forceName){
   if(!state||!state.country){alert("먼저 나라를 세워주세요.");return}
   playSound("click");
   const p=myProfile();
@@ -2424,8 +2466,21 @@ function openProfile(){
   document.getElementById("pfMotto").value=p.motto||"";
   document.getElementById("pfFlagCustom").value="";
   ["pfPresident","pfCountry","pfMotto"].forEach(id=>document.getElementById(id).oninput=pfPreview);
+  document.getElementById("pfNameHint").textContent=forceName?"🚫 이 이름은 이미 다른 나라가 쓰고 있어요. 새 이름을 정해주세요.":"";
+  document.getElementById("pfNameHint").style.color="var(--crimson)";
+  if(!window._pfNameBound){document.getElementById("pfCountry").addEventListener("input",pfNameCheck);window._pfNameBound=true}
   pfRenderPicks();
   document.getElementById("profileOverlay").classList.remove("hidden");
+}
+let pfNameTimer=null;
+function pfNameCheck(){
+  clearTimeout(pfNameTimer);
+  const hint=document.getElementById("pfNameHint"), v=document.getElementById("pfCountry").value.trim();
+  if(!db||!myUid||!v){hint.textContent="";return}
+  if(v===state.country&&!nameBlocked){hint.textContent="";return}
+  hint.textContent="확인 중..."; hint.style.color="var(--ink-soft)";
+  pfNameTimer=setTimeout(async()=>{const free=await isNameFree(v); if(document.getElementById("pfCountry").value.trim()!==v)return;
+    hint.textContent=free?"✅ 쓸 수 있는 이름이에요":"🚫 이미 있는 나라 이름이에요"; hint.style.color=free?"var(--pine)":"var(--crimson)";},400);
 }
 function closeProfile(){document.getElementById("profileOverlay").classList.add("hidden")}
 
@@ -2444,7 +2499,7 @@ function pfPreview(){
     motto:document.getElementById("pfMotto").value.trim(),color:pfDraft.color});
 }
 
-function saveProfile(){
+async function saveProfile(){
   const president=document.getElementById("pfPresident").value.trim();
   const country=document.getElementById("pfCountry").value.trim();
   const motto=document.getElementById("pfMotto").value.trim().slice(0,40);
@@ -2453,14 +2508,23 @@ function saveProfile(){
   const banWhy=pfDraft.flagPix?flagBanReason(pfDraft.flagPix):"";
   if(banWhy){playSound("error");alert(`🚫 ${banWhy}와(과) 비슷한 국기는 저장할 수 없어요. 모양을 바꿔주세요.`);return}
   const drewFlag = pfDraft.flagPix && pfDraft.flagPix!==((state.profile&&state.profile.flagPix)||"") && /[1-9a-f]/.test(pfDraft.flagPix);
+  if(db && myUid && (country!==state.country || nameBlocked)){
+    const btn=document.querySelector(".pf-row .btn-primary"); btn.disabled=true; btn.textContent="이름 확인 중...";
+    let ok=false; try{ ok=await claimName(country); }catch(e){ console.warn(e); }
+    btn.disabled=false; btn.textContent="저장하기";
+    if(!ok){playSound("error");alert(`🚫 '${country}'(이)라는 나라가 이미 있어요. 다른 이름을 써주세요.`);return}
+  }
+  const wasBlocked=nameBlocked;
   const oldCountry=state.country, oldPresident=state.president, oldFlag=state.flag;
   state.president=president; state.country=country; state.flag=pfDraft.flag;
   state.profile={avatar:pfDraft.avatar,motto,color:pfDraft.color,flagPix:(pfDraft.flagPix&&/[1-9a-f]/.test(pfDraft.flagPix))?pfDraft.flagPix:""};
   if(drewFlag && country===oldCountry) postNews(`🎨 ${country}, 직접 그린 새 국기 공개!`);
-  if(country!==oldCountry){state.log.push(`✏️ 국호 변경: ${oldCountry} → ${country}`);postNews(`✏️ ${oldFlag} ${oldCountry}, 국호를 ${state.flag} ${country}(으)로 바꿨습니다!`)}
+  if(country!==oldCountry){state.log.push(`✏️ 국호 변경: ${oldCountry} → ${country}`);if(!wasBlocked)postNews(`✏️ ${oldFlag} ${oldCountry}, 국호를 ${state.flag} ${country}(으)로 바꿨습니다!`)}
   else if(state.flag!==oldFlag) postNews(`🚩 ${country}, 새 국기 ${state.flag} 공개!`);
   if(president!==oldPresident) state.log.push(`✏️ 대통령 이름 변경: ${oldPresident} → ${president}`);
-  playSound("success"); closeProfile(); render(); publishNation(); showToast("👤 프로필 저장 완료");
+  playSound("success"); closeProfile(); render();
+  if(wasBlocked){ nameBlocked=false; await enterWorld(); }
+  publishNation(); showToast("👤 프로필 저장 완료");
 }
 
 /* ---------- 기존 기능과 연결 (뉴스 자동 발행) ---------- */
@@ -2495,7 +2559,7 @@ if("serviceWorker" in navigator){
   <div class="pf-sheet">
     <h3>👤 내 프로필</h3>
     <label>대통령 이름</label><input id="pfPresident" maxlength="12">
-    <label>나라 이름</label><input id="pfCountry" maxlength="12">
+    <label>나라 이름</label><input id="pfCountry" maxlength="12"><div id="pfNameHint" style="font-size:12px;font-weight:800;margin-top:4px"></div>
     <label>나라 한마디 (다른 나라에 보여요)</label><input id="pfMotto" maxlength="40" placeholder="예: 세계 최강의 나라가 되겠다!">
     <label>대통령 얼굴</label><div id="pfAvatars" class="pf-pick"></div>
     <label>국기</label><div id="pfFlags" class="pf-pick"></div>
